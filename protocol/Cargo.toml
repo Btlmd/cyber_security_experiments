@@ -1,0 +1,23 @@
+[package]
+name = "protocol"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+aes = { version = "0.7.5" }
+log = "0.4"
+pretty_env_logger = "0.4"
+rsa = "0.8.2"
+rand = "0.8.5"
+rust-crypto = "0.2.36"
+base64 = "0.13"
+sha2 = "0.9"
+
+
+[[bin]]
+name = "A"
+path = "src/A.rs"
+
+[[bin]]
+name = "B"
+path = "src/B.rs"
