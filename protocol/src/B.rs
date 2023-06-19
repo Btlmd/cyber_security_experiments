@@ -1,84 +1,129 @@
-use std::{net::{TcpListener, TcpStream}, thread, io::Write, mem};
+#[allow(non_snake_case)]
 use protocol::utils::*;
-use rand::thread_rng;
-use rsa::{pkcs8::{der::Decode, DecodePublicKey}, RsaPublicKey, PublicKey, PaddingScheme, Pkcs1v15Encrypt};
+use rsa::{pkcs8::DecodePublicKey, RsaPublicKey};
+use std::{
+    mem,
+    net::{TcpListener, TcpStream},
+};
 
-use log::{info, trace, error};
-use sha2::{Sha256, Digest};
+use log::{debug, error, info};
+use sha2::{Digest, Sha256};
 
-fn main() -> std::io::Result<()> {
+fn handle_requeststream(stream: &mut TcpStream, secret: &Key) -> Option<(Identifier, Key)> {
+    /* Step 2 */
+    debug!("Step 2");
+
+    // A -> B: [A, E_pw(public_key_a)]
+    let msg = read_message(stream).expect("Failed to read message from A");
+    let (ident, encrypted_public_key_a) = msg.split_at(mem::size_of::<Identifier>());
+    info!("Get request identified as {}", hex::encode(&ident));
+
+    // parse public key from A
+    let public_key_a_bytes = decrypt_aes(&encrypted_public_key_a, secret);
+    info!("Receive public key, hash = {}", {
+        let mut hasher = Sha256::new();
+        hasher.update(&public_key_a_bytes);
+        hex::encode(hasher.finalize())
+    });
+    let public_key_a = RsaPublicKey::from_public_key_der(&public_key_a_bytes)
+        .expect("Failed to parse public key bytes");
+
+    // B -> A: E(pw, E(public_key_a, session_key))
+    let session_key = get_session_key();
+    info!("Generated session_key = {}", hex::encode(&session_key));
+    let rsa_encrypted_session_key = encrypt_rsa(&session_key, &public_key_a);
+    let symmetric_encrypted_session_key = encrypt_aes(&rsa_encrypted_session_key, secret);
+    send_message(
+        stream,
+        &symmetric_encrypted_session_key,
+        Some("E(pw, E(public_key_a, session_key))"),
+    );
+
+    /* Step 4 */
+    debug!("Step 4");
+
+    // A -> B: E(session_key, nonce_a)
+    let nonce_a = decrypt_aes(
+        &read_message(stream).expect("Failed to read E(session_key, nonce_a) from A"),
+        &session_key,
+    );
+    info!("Received nonce_a = {}", hex::encode(&nonce_a));
+
+    // B -> A: E(session_key, nonce_a || nonce_b)
+    let nonce_b = get_nouce();
+    let encrypted_nonce_a_cat_nonce_b =
+        encrypt_aes(&[nonce_a, Vec::from(nonce_b)].concat(), &session_key);
+    send_message(
+        stream,
+        &encrypted_nonce_a_cat_nonce_b,
+        Some("E(session_key, nonce_a || nonce_b)"),
+    );
+
+    /* Step 6 */
+    debug!("Step 6");
+
+    // A -> B: E(session_key, nonce_b)
+    let nonce_b_recv = decrypt_aes(
+        &read_message(stream).expect("Failed to read E(session_key, nonce_b) from A"),
+        &session_key,
+    );
+    let nonce_b_recv = nonce_b_recv.as_slice();
+    info!("Received nonce_b = {}", hex::encode(&nonce_b_recv));
+
+
+    // Check nonce_b_recv
+    if nonce_b != nonce_b_recv {
+        error!(
+            "Nouce mismatch: nonce_b != nonce_b_recv, i.e. {} != {}",
+            hex::encode(&nonce_b),
+            hex::encode(&nonce_b_recv)
+        );
+        return None;
+    } else {
+        info!("Nonce match. Identity confirmed.");
+    }
+
+    // convert to Identifier and Key
+    let ident: Identifier = ident
+        .try_into()
+        .expect("Failed to convert ident to Identifier");
+    let session_key: Key = session_key
+        .try_into()
+        .expect("Failed to convert session_key to Key");
+
+    Some((ident, session_key))
+}
+
+fn main() {
     pretty_env_logger::init();
     let (addr, secret) = get_env();
     let listener = TcpListener::bind(&addr).expect(format!("Failed to bind to {}", &addr).as_str());
     info!("Listening on {}", addr);
 
-    // get an incoming stream
-    let (mut stream, _) = listener.accept().expect("Failed to accept connection");
-    trace!("Accepted connection from {:?}", stream.peer_addr()?);
+    loop {
+        let (mut stream, _) = listener.accept().expect("Failed to accept connection");
+        info!("Accepted connection from {:?}", stream.peer_addr().unwrap());
 
-    // 1: A -> B: A, E_pw(pk_A)
-    let msg = read_stream_by_len(&mut stream, 308)
-                                            .expect("Failed to read message from A");
-    let (ident, E_pw_pkA) = msg.split_at(mem::size_of::<Identifier>());
-    info!("Get request from {:?}, E_pw(pk_A) length: {}", ident, E_pw_pkA.len());
+        match handle_requeststream(&mut stream, &secret) {
+            Some((_, session_key)) => {
+                let test_messsage_from_a =
+                    read_message(&mut stream).expect("Failed to read test message from A");
+                let test_messsage_from_a = decrypt_aes(&test_messsage_from_a, &session_key);
+                info!(
+                    "Received test message from A: `{}`",
+                    String::from_utf8(test_messsage_from_a).unwrap()
+                );
 
-    // parse public key from A
-    let pk_A_bytes = aes_dec(&E_pw_pkA, &secret);
-    info!("Receive public key, hash = {:?}", {
-        let mut hasher = Sha256::new();
-        hasher.update(&pk_A_bytes);
-        hasher.finalize()
-    });
-    let pk_A = RsaPublicKey::from_public_key_der(&pk_A_bytes).expect("Failed to parse public key bytes");
-
-    // 2: B -> A: E_pw(E_pkA(Ks))
-    let K_session = get_session_key();
-    info!("Generated K_session = {:?}", K_session);
-    let E_pkA_Ks = pk_A.encrypt(
-            &mut thread_rng(),
-            Pkcs1v15Encrypt,
-            &K_session.clone()
-        ).unwrap();
-    let E_pw_E_pkA_Ks = aes_enc(&E_pkA_Ks, &secret);
-    match stream.write(&E_pw_E_pkA_Ks) {
-        Ok(n) => trace!("Sent E_pw(E_pkA(Ks)) to A, with {} bytes", n),
-        Err(e) => panic!("Failed to send E_pw(E_pkA(Ks)) to A: {:?}", e)
+                let message = "TEST MESSAGE FROM B";
+                let encrypted_message = encrypt_aes(message.as_bytes(), &session_key);
+                send_message(&mut stream, &encrypted_message, Some("Test Message"));
+            }
+            None => {
+                error!(
+                    "Fail to establish connection from {:?}",
+                    stream.peer_addr().unwrap()
+                );
+            }
+        }
     }
-
-    // 3: A -> B: E_Ks(N_A)
-    let E_Ks_NA = read_stream_by_len(&mut stream, 32)
-        .expect("Failed to read E_Ks_NA from A");
-    let N_A = aes_dec(&E_Ks_NA, &K_session);
-    info!("Received N_A = {:?}", N_A);
-    
-    // 4: B -> A: E_Ks(N_A || N_B)
-    let N_B = get_nouce();
-    let N_AB = [N_A, Vec::from(N_B)].concat();
-    let E_Ks_NAB = aes_enc(&N_AB, &K_session);
-    match stream.write(&E_Ks_NAB) {
-        Ok(n) => trace!("Sent E_Ks(N_AB) to A, with {} bytes", n),
-        Err(e) => panic!("Failed to send E_Ks(N_AB) to A: {:?}", e)
-    }
-
-    // 5: A -> B: E_Ks(N_B)
-    let N_B_back_data = read_stream_by_len(&mut stream, 32)
-        .expect("Failed to read E_Ks(N_B) from A");
-    let N_B_recv = aes_dec(&N_B_back_data, &K_session);
-    let N_B_recv = N_B_recv.as_slice();
-
-    if N_B != N_B_recv {
-        error!("Nouce mismatch: N_B != N_B_recv, i.e. {:?} != {:?}", N_B, N_B_recv);
-        std::process::exit(1);
-    }
-
-    // Last Step
-    println!("Connection established!");
-    println!("Hello world from peer B!");
-
-    let message = "Hello world from peer A!".as_bytes();
-    let encrypted_message = aes_enc(message, &K_session);
-    // println!("Encrypted message: {:?}", encrypted_message.len());
-    stream.write(&encrypted_message).expect("Failed to send message to A");
-
-    Ok(())
 }
